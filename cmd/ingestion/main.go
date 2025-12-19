@@ -4,14 +4,14 @@ import (
 	"context"
 	"log"
 
-	"github.com/MKVAppDev/go-ingestion/internal/auth"
 	"github.com/MKVAppDev/go-ingestion/internal/config"
 	"github.com/MKVAppDev/go-ingestion/internal/dnse"
+	auth "github.com/MKVAppDev/go-ingestion/internal/dnseauth"
+	"github.com/MKVAppDev/go-ingestion/internal/redispub"
 )
 
 func main() {
 	cfg := config.Load()
-
 	ctx := context.Background()
 
 	token, err := auth.Authentication(ctx, cfg.Username, cfg.Password)
@@ -19,16 +19,22 @@ func main() {
 		log.Fatalf("authenticate failed: %v", err)
 	}
 
-	log.Printf("Got token len=%d", len(token))
-
 	info, err := auth.GetInvestorInfo(ctx, token)
 	if err != nil {
 		log.Fatalf("getInvestorInfo failed: %v", err)
 	}
 
-	log.Printf("InvestorID: %s", info.InvestorID)
+	pub := redispub.New(cfg.RedisAddr)
+	defer pub.Close()
 
-	if err := dnse.Run(info.InvestorID, token); err != nil {
-		log.Fatalf("mqtt run failed: %v", err)
+	tickers := []string{"MSB", "FPT"}
+
+	// 4 workers with 50000 buffer
+	client := dnse.NewClient(pub, cfg.Env, 4, 50000)
+
+	err = client.Run(info.InvestorID, token, tickers)
+
+	if err != nil {
+		log.Fatalf("dnse client error: %v", err)
 	}
 }
