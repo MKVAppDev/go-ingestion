@@ -52,6 +52,11 @@ func (c *Client) Run(investorID, token string, tickers []string) error {
 		go c.worker(i)
 	}
 
+	channels := c.allChannels(tickers)
+
+	done := make(chan struct{})
+	go c.monitorSubscribers(done, channels)
+
 	opts := mqtt.NewClientOptions().
 		AddBroker(brokerURL).
 		SetClientID(clientID).
@@ -141,6 +146,20 @@ func (c *Client) worker(id int) {
 	}
 }
 
+func (c *Client) allChannels(tickers []string) []string {
+	var channels []string
+	datatypes := []string{"tick", "ohlc", "topprice", "stockinfo"}
+
+	for _, sym := range tickers {
+		for _, dt := range datatypes {
+			ch := buildRedisChannel(c.env, c.source, c.market, dt, sym)
+			channels = append(channels, ch)
+		}
+	}
+
+	return channels
+}
+
 func mapDatatype(topic string) string {
 	switch {
 	case strings.Contains(topic, "/tick/"):
@@ -165,5 +184,38 @@ func extractSymbol(topic string) string {
 }
 
 func buildRedisChannel(env, source, market, datatype, symbol string) string {
+	// channel format as <env>.<source>.<market>.<datatype>.<symbol>
+	// example: prod.dnse.krx.tick.FPT
 	return fmt.Sprintf("%s.%s.%s.%s.%s", env, source, market, datatype, symbol)
+}
+
+func (c *Client) monitorSubscribers(done chan<- struct{}, channels []string) {
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	idleStart := time.Now()
+
+	for range ticker.C {
+		m, err := c.publisher.NumSubMany(channels...)
+		if err != nil {
+			log.Printf("monitor error PubSubNumSub %v", err)
+			continue
+		}
+
+		var total int64
+		for _, n := range m {
+			total += n
+		}
+
+		if total == 0 {
+			if time.Since(idleStart) >= 5*time.Minute {
+				close(done)
+				return
+			}
+		} else {
+			idleStart = time.Now()
+		}
+	}
+
 }

@@ -16,7 +16,7 @@ type Config struct {
 
 func Load() *Config {
 
-	if err := godotenv.Load(".env"); err != nil {
+	if err := godotenv.Load("/Users/thainq/Desktop/mkv/go-ingestion/.env"); err != nil {
 		log.Printf("warning: cannot load ../.env: %v", err)
 	}
 
