@@ -1,0 +1,52 @@
+# Git
+
+.git
+.gitignore
+
+# Environment files - allow .env files to be copied
+
+!.env
+!.env.\*
+
+# Docker
+
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation
+
+README.md
+\*.md
+
+# Binaries
+
+_.exe
+_.dll
+_.so
+_.dylib
+ingestion
+
+# Test files
+
+\*\_test.go
+testdata/
+
+# IDE
+
+.vscode
+.idea
+_.swp
+_.swo
+\*~
+
+# OS
+
+.DS_Store
+Thumbs.db
+
+# Temporary files
+
+\*.log
+tmp/
+temp/
