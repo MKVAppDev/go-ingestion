@@ -27,3 +27,7 @@ func (p *Publisher) Publish(channel string, payload []byte) error {
 func (p *Publisher) Close() error {
 	return p.rdb.Close()
 }
+
+func (p *Publisher) Subscribe(ctx context.Context, channels ...string) *redis.PubSub {
+	return p.rdb.Subscribe(ctx, channels...)
+}

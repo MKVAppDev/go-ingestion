@@ -1,11 +1,14 @@
 package dnse
 
 import (
+	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MKVAppDev/go-ingestion/internal/redispub"
@@ -30,6 +33,10 @@ type Client struct {
 	market    string
 	msgCh     chan Msg
 	workers   int
+
+	mqttClient mqtt.Client
+	tickersMu  sync.Mutex
+	tickers    map[string]struct{}
 }
 
 func NewClient(pub *redispub.Publisher, env string, workers int, buffer int) *Client {
@@ -40,10 +47,11 @@ func NewClient(pub *redispub.Publisher, env string, workers int, buffer int) *Cl
 		market:    "krx",
 		msgCh:     make(chan Msg, buffer),
 		workers:   workers,
+		tickers:   make(map[string]struct{}),
 	}
 }
 
-func (c *Client) Run(investorID, token string, tickers []string) error {
+func (c *Client) Run(investorID, token string) error {
 	rand.Seed(time.Now().UnixNano())
 	clientID := fmt.Sprintf("%s%d", clientPrefix, rand.Intn(1000)+1000)
 	brokerURL := fmt.Sprintf("wss://%s:%d/wss", brokerHost, brokerPort)
@@ -68,21 +76,11 @@ func (c *Client) Run(investorID, token string, tickers []string) error {
 	opts.OnConnect = func(m mqtt.Client) {
 		log.Println("Connected to MQTT Broker")
 
-		for _, symbol := range tickers {
-			topics := []string{
-				"plaintext/quotes/krx/mdds/stockinfo/v1/roundlot/symbol/" + symbol,
-				"plaintext/quotes/krx/mdds/topprice/v1/roundlot/symbol/" + symbol,
-				"plaintext/quotes/krx/mdds/v2/ohlc/stock/1/" + symbol,
-				"plaintext/quotes/krx/mdds/tick/v1/roundlot/symbol/" + symbol,
-			}
+		c.tickersMu.Lock()
+		defer c.tickersMu.Unlock()
 
-			for _, topic := range topics {
-				if token := m.Subscribe(topic, 1, c.onMessage); token.Wait() && token.Error() != nil {
-					log.Printf("❌ Subscribe error for %s: %v", topic, token.Error())
-				} else {
-					log.Printf("✅ Subscribed to %s", topic)
-				}
-			}
+		for symbol := range c.tickers {
+			c.subscribeSymbol(m, symbol)
 		}
 	}
 
@@ -98,13 +96,107 @@ func (c *Client) Run(investorID, token string, tickers []string) error {
 		log.Println("🔄 Attempting to reconnect to MQTT Broker...")
 	}
 
-	client := mqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
+	c.mqttClient = mqtt.NewClient(opts)
+	if token := c.mqttClient.Connect(); token.Wait() && token.Error() != nil {
 		return fmt.Errorf("connect error: %v", token.Error())
 	}
 
+	c.listenTickerEvents()
+
 	log.Println("🟢 MQTT Client is running. Press Ctrl+C to exit.")
 	select {}
+}
+
+func (c *Client) subscribeSymbol(m mqtt.Client, symbol string) {
+
+	topics := []string{
+		"plaintext/quotes/krx/mdds/stockinfo/v1/roundlot/symbol/" + symbol,
+		"plaintext/quotes/krx/mdds/topprice/v1/roundlot/symbol/" + symbol,
+		"plaintext/quotes/krx/mdds/v2/ohlc/stock/1/" + symbol,
+		"plaintext/quotes/krx/mdds/tick/v1/roundlot/symbol/" + symbol,
+	}
+
+	for _, topic := range topics {
+		if token := m.Subscribe(topic, 1, c.onMessage); token.Wait() && token.Error() != nil {
+			log.Printf("❌ Subscribe error for %s: %v", topic, token.Error())
+		}
+	}
+
+	log.Printf("✅ Subscribed to %s", symbol)
+}
+
+func (c *Client) unsubscribeSymbol(m mqtt.Client, symbol string) {
+	topics := []string{
+		"plaintext/quotes/krx/mdds/stockinfo/v1/roundlot/symbol/" + symbol,
+		"plaintext/quotes/krx/mdds/topprice/v1/roundlot/symbol/" + symbol,
+		"plaintext/quotes/krx/mdds/v2/ohlc/stock/1/" + symbol,
+		"plaintext/quotes/krx/mdds/tick/v1/roundlot/symbol/" + symbol,
+	}
+
+	if token := m.Unsubscribe(topics...); token.Wait() && token.Error() != nil {
+		log.Printf("❌ Unsubscribe error for %v: %v", topics, token.Error())
+	}
+
+	log.Printf("⛔ Unsubscribed %s", symbol)
+}
+
+type tickerEvent struct {
+	Symbol string `json:"symbol"`
+	Count  int    `json:"count"`
+}
+
+func (c *Client) listenTickerEvents() {
+	channel := fmt.Sprintf("%s.dnse.krx.tickers.events", c.env)
+
+	go func() {
+		ctx := context.Background()
+		pubsub := c.publisher.Subscribe(ctx, channel)
+		defer pubsub.Close()
+
+		ch := pubsub.Channel()
+		log.Printf("listening ticker events on %s", channel)
+
+		for msg := range ch {
+			var evt tickerEvent
+			if err := json.Unmarshal([]byte(msg.Payload), &evt); err != nil {
+				log.Printf("ticker event invalid: %v", err)
+				continue
+			}
+
+			sym := strings.ToUpper(strings.TrimSpace(evt.Symbol))
+			if sym == "" {
+				continue
+			}
+
+			if evt.Count >= 1 {
+				// ensure symbol is in map + subscribed
+				c.tickersMu.Lock()
+				_, existed := c.tickers[sym]
+				if !existed {
+					c.tickers[sym] = struct{}{}
+				}
+				c.tickersMu.Unlock()
+
+				if !existed && c.mqttClient != nil && c.mqttClient.IsConnected() {
+					log.Printf("event: count=%d for %s -> subscribe", evt.Count, sym)
+					c.subscribeSymbol(c.mqttClient, sym)
+				}
+			} else {
+				// count < 1 -> ensure unsubscribed
+				c.tickersMu.Lock()
+				_, existed := c.tickers[sym]
+				if existed {
+					delete(c.tickers, sym)
+				}
+				c.tickersMu.Unlock()
+
+				if existed && c.mqttClient != nil && c.mqttClient.IsConnected() {
+					log.Printf("event: count=%d for %s -> unsubscribe", evt.Count, sym)
+					c.unsubscribeSymbol(c.mqttClient, sym)
+				}
+			}
+		}
+	}()
 }
 
 func (c *Client) onMessage(client mqtt.Client, msg mqtt.Message) {
@@ -165,5 +257,7 @@ func extractSymbol(topic string) string {
 }
 
 func buildRedisChannel(env, source, market, datatype, symbol string) string {
+	// channel format as <env>.<source>.<market>.<datatype>.<symbol>
+	// example: prod.dnse.krx.tick.FPT
 	return fmt.Sprintf("%s.%s.%s.%s.%s", env, source, market, datatype, symbol)
 }

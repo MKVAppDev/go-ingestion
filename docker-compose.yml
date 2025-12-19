@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:8.4.0-alpine
+    container_name: go-ingestion-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ingestion-network
+    restart: unless-stopped
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: go-ingestion-app
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - USR=${USR}
+      - PASSWD=${PASSWD}
+      - REDIS_ADDR=redis:6379
+      - ENV=${ENV:-production}
+    networks:
+      - ingestion-network
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  ingestion-network:
+    driver: bridge

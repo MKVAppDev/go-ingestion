@@ -3,6 +3,8 @@ package config
 import (
 	"log"
 	"os"
+	"path/filepath"
+	"runtime"
 
 	"github.com/joho/godotenv"
 )
@@ -16,8 +18,10 @@ type Config struct {
 
 func Load() *Config {
 
-	if err := godotenv.Load(".env"); err != nil {
-		log.Printf("warning: cannot load ../.env: %v", err)
+	envPath := LoadEnvPath()
+
+	if err := godotenv.Load(envPath); err != nil {
+		log.Printf("warning: cannot load .env from %s: %v", envPath, err)
 	}
 
 	username := os.Getenv("USR")
@@ -47,5 +51,14 @@ func Load() *Config {
 		RedisAddr: redisAddr,
 		Env:       env,
 	}
+}
 
+func LoadEnvPath() string {
+
+	_, filename, _, _ := runtime.Caller(0)
+	dir := filepath.Dir(filename)
+
+	envPath := filepath.Join(dir, "..", "..", ".env")
+
+	return envPath
 }
