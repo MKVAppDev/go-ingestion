@@ -28,7 +28,6 @@ func (p *Publisher) Close() error {
 	return p.rdb.Close()
 }
 
-func (p *Publisher) NumSubMany(channels ...string) (map[string]int64, error) {
-	res := p.rdb.PubSubNumSub(p.ctx, channels...)
-	return res.Result()
+func (p *Publisher) Subscribe(ctx context.Context, channels ...string) *redis.PubSub {
+	return p.rdb.Subscribe(ctx, channels...)
 }

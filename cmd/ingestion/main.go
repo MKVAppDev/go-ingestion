@@ -27,12 +27,10 @@ func main() {
 	pub := redispub.New(cfg.RedisAddr)
 	defer pub.Close()
 
-	tickers := []string{"MSB", "FPT"}
-
 	// 4 workers with 50000 buffer
 	client := dnse.NewClient(pub, cfg.Env, 4, 50000)
 
-	err = client.Run(info.InvestorID, token, tickers)
+	err = client.Run(info.InvestorID, token)
 
 	if err != nil {
 		log.Fatalf("dnse client error: %v", err)
