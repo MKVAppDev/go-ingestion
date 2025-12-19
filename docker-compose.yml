@@ -3,7 +3,7 @@ version: "3.8"
 services:
   redis:
     image: redis:8.4.0-alpine
-    container_name: go-ingestion-redis
+    container_name: pubsub-redis
     ports:
       - "6379:6379"
     volumes:
