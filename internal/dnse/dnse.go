@@ -2,7 +2,6 @@ package dnse
 
 import (
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -30,24 +29,44 @@ func Run(investorID, token string) error {
 		SetUsername(investorID).
 		SetPassword(token).
 		SetProtocolVersion(5).
+		SetKeepAlive(60 * time.Second).
+		SetPingTimeout(10 * time.Second).
+		SetAutoReconnect(true).
 		SetTLSConfig(&tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: false,
 		})
 
 	opts.OnConnect = func(c mqtt.Client) {
 		log.Println("Connected to MQTT Broker")
 
-		topic := "plaintext/quotes/krx/mdds/stockinfo/v1/roundlot/symbol/fpt"
+		symbol := "FPT"
 
-		if token := c.Subscribe(topic, 1, onMessage); token.Wait() && token.Error() != nil {
-			log.Printf("Subscribe error: %v", token.Error())
-		} else {
-			log.Printf("Subscribed to %s", topic)
+		topics := []string{
+			"plaintext/quotes/krx/mdds/stockinfo/v1/roundlot/symbol/" + symbol,
+			"plaintext/quotes/krx/mdds/topprice/v1/roundlot/symbol/" + symbol,
+			"plaintext/quotes/krx/mdds/v2/ohlc/stock/1/" + symbol,
+			"plaintext/quotes/krx/mdds/tick/v1/roundlot/symbol/" + symbol,
+		}
+
+		for _, topic := range topics {
+			if token := c.Subscribe(topic, 1, onMessage); token.Wait() && token.Error() != nil {
+				log.Printf("❌ Subscribe error for %s: %v", topic, token.Error())
+			} else {
+				log.Printf("✅ Subscribed to %s", topic)
+			}
 		}
 	}
 
+	opts.SetDefaultPublishHandler(func(c mqtt.Client, m mqtt.Message) {
+		log.Printf("🔔 Default handler - Message on topic: %s, payload: %s", m.Topic(), string(m.Payload()))
+	})
+
 	opts.OnConnectionLost = func(c mqtt.Client, err error) {
-		log.Printf("Connection lost: %v", err)
+		log.Printf("❌ Connection lost: %v - Will attempt to reconnect...", err)
+	}
+
+	opts.OnReconnecting = func(c mqtt.Client, opts *mqtt.ClientOptions) {
+		log.Println("🔄 Attempting to reconnect to MQTT Broker...")
 	}
 
 	client := mqtt.NewClient(opts)
@@ -55,22 +74,12 @@ func Run(investorID, token string) error {
 		return fmt.Errorf("connect error: %v", token.Error())
 	}
 
+	log.Println("🟢 MQTT Client is running. Press Ctrl+C to exit.")
 	select {}
 }
 
 func onMessage(client mqtt.Client, msg mqtt.Message) {
-	var payload map[string]any
-	if err := json.Unmarshal(msg.Payload(), &payload); err != nil {
-		log.Printf("Failed to unmarshal message: %v", err)
-		return
-	}
-
-	symbol, _ := payload["symbol"].(string)
-	matchPrice := payload["matchPrice"]
-	matchQtty := payload["matchQtty"]
-	side, _ := payload["side"].(string)
-	sendingTime, _ := payload["sendingTime"].(string)
-
-	fmt.Printf("%v: %v - Match Quantity: %v - Side: %s - Time: %s\n",
-		symbol, matchPrice, matchQtty, side, sendingTime)
+	log.Printf("📨 Message received on topic: %s", msg.Topic())
+	log.Printf("📦 Payload length: %d bytes", len(msg.Payload()))
+	log.Printf("📄 Raw payload: %s", string(msg.Payload()))
 }
