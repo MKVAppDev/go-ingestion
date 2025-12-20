@@ -2,7 +2,10 @@ version: "3.8"
 
 services:
   ingestion:
-    image: azamiue/go-ingestion:latest
+    image: azamiue/go-ingestion:dev
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     container_name: go-ingestion-app
     network_mode: "host"
     environment:
