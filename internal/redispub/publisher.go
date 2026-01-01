@@ -28,6 +28,10 @@ func (p *Publisher) Close() error {
 	return p.rdb.Close()
 }
 
+func (p *Publisher) Ping(ctx context.Context) error {
+	return p.rdb.Ping(ctx).Err()
+}
+
 func (p *Publisher) Subscribe(ctx context.Context, channels ...string) *redis.PubSub {
 	return p.rdb.Subscribe(ctx, channels...)
 }
