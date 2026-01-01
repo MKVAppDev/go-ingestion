@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	auth "github.com/MKVAppDev/go-ingestion/internal/dnseauth"
 	"github.com/MKVAppDev/go-ingestion/internal/redispub"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
@@ -37,6 +38,12 @@ type Client struct {
 	mqttClient mqtt.Client
 	tickersMu  sync.Mutex
 	tickers    map[string]struct{}
+
+	username   string
+	password   string
+	investorID string
+	token      string
+	tokenMu    sync.RWMutex
 }
 
 func NewClient(pub *redispub.Publisher, env string, workers int, buffer int) *Client {
@@ -51,7 +58,13 @@ func NewClient(pub *redispub.Publisher, env string, workers int, buffer int) *Cl
 	}
 }
 
-func (c *Client) Run(investorID, token string) error {
+func (c *Client) Run(username, password, investorID, token string) error {
+
+	c.username = username
+	c.password = password
+	c.investorID = investorID
+	c.setToken(token)
+
 	rand.Seed(time.Now().UnixNano())
 	clientID := fmt.Sprintf("%s%d", clientPrefix, rand.Intn(1000)+1000)
 	brokerURL := fmt.Sprintf("wss://%s:%d/wss", brokerHost, brokerPort)
@@ -74,7 +87,7 @@ func (c *Client) Run(investorID, token string) error {
 		})
 
 	opts.OnConnect = func(m mqtt.Client) {
-		log.Println("Connected to MQTT Broker")
+		log.Println("✅ Connected to MQTT Broker")
 
 		c.tickersMu.Lock()
 		defer c.tickersMu.Unlock()
@@ -92,8 +105,35 @@ func (c *Client) Run(investorID, token string) error {
 		log.Printf("❌ Connection lost: %v - Will attempt to reconnect...", err)
 	}
 
-	opts.OnReconnecting = func(c mqtt.Client, opts *mqtt.ClientOptions) {
+	opts.OnReconnecting = func(mqttClient mqtt.Client, opts *mqtt.ClientOptions) {
 		log.Println("🔄 Attempting to reconnect to MQTT Broker...")
+
+		reconnectTimeout := time.After(10 * time.Second)
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-reconnectTimeout:
+				log.Println("⏱️ Reconnect timeout - attempting to refresh token...")
+				if err := c.refreshToken(); err != nil {
+					log.Printf("❌ Failed to refresh token: %v", err)
+					return
+				}
+
+				currentToken := c.getToken()
+				opts.SetUsername(c.investorID)
+				opts.SetPassword(currentToken)
+				log.Println("🔑 Token refreshed successfully, reconnecting with new credentials...")
+				return
+
+			case <-ticker.C:
+				if mqttClient.IsConnected() {
+					log.Println("✅ Reconnected successfully!")
+					return
+				}
+			}
+		}
 	}
 
 	c.mqttClient = mqtt.NewClient(opts)
@@ -105,6 +145,42 @@ func (c *Client) Run(investorID, token string) error {
 
 	log.Println("🟢 MQTT Client is running. Press Ctrl+C to exit.")
 	select {}
+}
+
+func (c *Client) setToken(token string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.token = token
+}
+
+func (c *Client) getToken() string {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.token
+}
+
+func (c *Client) refreshToken() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	log.Printf("🔐 Authenticating with username: %s", c.username)
+	newToken, err := auth.Authentication(ctx, c.username, c.password)
+	if err != nil {
+		return fmt.Errorf("authentication failed: %w", err)
+	}
+
+	info, err := auth.GetInvestorInfo(ctx, newToken)
+	if err != nil {
+		return fmt.Errorf("get investor info failed: %w", err)
+	}
+
+	if info.InvestorID != c.investorID {
+		return fmt.Errorf("investor ID mismatch: expected %s, got %s", c.investorID, info.InvestorID)
+	}
+
+	c.setToken(newToken)
+	log.Println("✅ Token refreshed and verified successfully")
+	return nil
 }
 
 func (c *Client) subscribeSymbol(m mqtt.Client, symbol string) {

@@ -36,7 +36,7 @@ func main() {
 	// 4 workers with 50000 buffer
 	client := dnse.NewClient(pub, cfg.Env, 4, 50000)
 
-	err = client.Run(info.InvestorID, token)
+	err = client.Run(cfg.Username, cfg.Password, info.InvestorID, token)
 
 	if err != nil {
 		log.Fatalf("dnse client error: %v", err)

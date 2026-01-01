@@ -8,11 +8,13 @@ services:
     #   dockerfile: Dockerfile
     container_name: go-ingestion-app
     network_mode: "host"
+    env_file:
+      - .env
     environment:
       - USR=${USR}
       - PASSWD=${PASSWD}
       - REDIS_ADDR=${REDIS_ADDR:-localhost:6379}
-      - ENV=${ENV:-production}
+      - ENV=${ENV:-prod}
     restart: unless-stopped
     logging:
       driver: "json-file"
