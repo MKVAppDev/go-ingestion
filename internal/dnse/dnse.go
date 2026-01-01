@@ -59,7 +59,6 @@ func NewClient(pub *redispub.Publisher, env string, workers int, buffer int) *Cl
 }
 
 func (c *Client) Run(username, password, investorID, token string) error {
-
 	c.username = username
 	c.password = password
 	c.investorID = investorID
@@ -218,7 +217,7 @@ func (c *Client) unsubscribeSymbol(m mqtt.Client, symbol string) {
 
 type tickerEvent struct {
 	Symbol string `json:"symbol"`
-	Count  int    `json:"count"`
+	Active bool   `json:"active"`
 }
 
 func (c *Client) listenTickerEvents() {
@@ -244,8 +243,7 @@ func (c *Client) listenTickerEvents() {
 				continue
 			}
 
-			if evt.Count >= 1 {
-				// ensure symbol is in map + subscribed
+			if evt.Active == true {
 				c.tickersMu.Lock()
 				_, existed := c.tickers[sym]
 				if !existed {
@@ -254,11 +252,9 @@ func (c *Client) listenTickerEvents() {
 				c.tickersMu.Unlock()
 
 				if !existed && c.mqttClient != nil && c.mqttClient.IsConnected() {
-					log.Printf("event: count=%d for %s -> subscribe", evt.Count, sym)
 					c.subscribeSymbol(c.mqttClient, sym)
 				}
 			} else {
-				// count < 1 -> ensure unsubscribed
 				c.tickersMu.Lock()
 				_, existed := c.tickers[sym]
 				if existed {
@@ -267,7 +263,6 @@ func (c *Client) listenTickerEvents() {
 				c.tickersMu.Unlock()
 
 				if existed && c.mqttClient != nil && c.mqttClient.IsConnected() {
-					log.Printf("event: count=%d for %s -> unsubscribe", evt.Count, sym)
 					c.unsubscribeSymbol(c.mqttClient, sym)
 				}
 			}
