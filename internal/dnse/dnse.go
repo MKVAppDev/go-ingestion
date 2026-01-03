@@ -17,9 +17,12 @@ import (
 )
 
 const (
-	brokerHost   = "datafeed-lts-krx.dnse.com.vn"
-	brokerPort   = 443
-	clientPrefix = "dnse-user-client-mkv-"
+	brokerHost           = "datafeed-lts-krx.dnse.com.vn"
+	brokerPort           = 443
+	clientPrefix         = "dnse-user-client-mkv-"
+	tokenRefreshInterval = 30 * time.Minute // Refresh token every 30 minutes
+	maxSubscribeRetries  = 3
+	subscribeRetryDelay  = 2 * time.Second
 )
 
 type Msg struct {
@@ -35,9 +38,11 @@ type Client struct {
 	msgCh     chan Msg
 	workers   int
 
-	mqttClient mqtt.Client
-	tickersMu  sync.Mutex
-	tickers    map[string]struct{}
+	mqttClient       mqtt.Client
+	mqttOpts         *mqtt.ClientOptions
+	tickersMu        sync.Mutex
+	tickers          map[string]struct{}
+	stopTokenRefresh chan struct{}
 
 	username   string
 	password   string
@@ -48,13 +53,14 @@ type Client struct {
 
 func NewClient(pub *redispub.Publisher, env string, workers int, buffer int) *Client {
 	return &Client{
-		publisher: pub,
-		env:       env,
-		source:    "dnse",
-		market:    "krx",
-		msgCh:     make(chan Msg, buffer),
-		workers:   workers,
-		tickers:   make(map[string]struct{}),
+		publisher:        pub,
+		env:              env,
+		source:           "dnse",
+		market:           "krx",
+		msgCh:            make(chan Msg, buffer),
+		workers:          workers,
+		tickers:          make(map[string]struct{}),
+		stopTokenRefresh: make(chan struct{}),
 	}
 }
 
@@ -81,6 +87,8 @@ func (c *Client) Run(username, password, investorID, token string) error {
 		SetKeepAlive(60 * time.Second).
 		SetPingTimeout(10 * time.Second).
 		SetAutoReconnect(true).
+		SetResumeSubs(true).
+		SetMaxReconnectInterval(1 * time.Minute).
 		SetTLSConfig(&tls.Config{
 			InsecureSkipVerify: true,
 		})
@@ -107,25 +115,25 @@ func (c *Client) Run(username, password, investorID, token string) error {
 	opts.OnReconnecting = func(mqttClient mqtt.Client, opts *mqtt.ClientOptions) {
 		log.Println("🔄 Attempting to reconnect to MQTT Broker...")
 
-		reconnectTimeout := time.After(10 * time.Second)
+		log.Println("🔑 Refreshing token before reconnect...")
+		if err := c.refreshToken(); err != nil {
+			log.Printf("❌ Failed to refresh token: %v", err)
+		} else {
+			currentToken := c.getToken()
+			opts.SetUsername(c.investorID)
+			opts.SetPassword(currentToken)
+			log.Println("✅ Token refreshed successfully, reconnecting with new credentials...")
+		}
+
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
+		timeout := time.After(30 * time.Second)
 
 		for {
 			select {
-			case <-reconnectTimeout:
-				log.Println("⏱️ Reconnect timeout - attempting to refresh token...")
-				if err := c.refreshToken(); err != nil {
-					log.Printf("❌ Failed to refresh token: %v", err)
-					return
-				}
-
-				currentToken := c.getToken()
-				opts.SetUsername(c.investorID)
-				opts.SetPassword(currentToken)
-				log.Println("🔑 Token refreshed successfully, reconnecting with new credentials...")
+			case <-timeout:
+				log.Println("⏱️ Reconnect timeout after 30 seconds")
 				return
-
 			case <-ticker.C:
 				if mqttClient.IsConnected() {
 					log.Println("✅ Reconnected successfully!")
@@ -136,9 +144,13 @@ func (c *Client) Run(username, password, investorID, token string) error {
 	}
 
 	c.mqttClient = mqtt.NewClient(opts)
+	c.mqttOpts = opts
+
 	if token := c.mqttClient.Connect(); token.Wait() && token.Error() != nil {
 		return fmt.Errorf("connect error: %v", token.Error())
 	}
+
+	go c.periodicTokenRefresh()
 
 	c.listenTickerEvents()
 
@@ -182,6 +194,35 @@ func (c *Client) refreshToken() error {
 	return nil
 }
 
+func (c *Client) periodicTokenRefresh() {
+	ticker := time.NewTicker(tokenRefreshInterval)
+	defer ticker.Stop()
+
+	log.Printf("🔄 Starting periodic token refresh every %v", tokenRefreshInterval)
+
+	for {
+		select {
+		case <-ticker.C:
+			log.Println("⏰ Periodic token refresh triggered")
+			if err := c.refreshToken(); err != nil {
+				log.Printf("❌ Periodic token refresh failed: %v", err)
+				continue
+			}
+
+			if c.mqttClient != nil && c.mqttOpts != nil {
+				currentToken := c.getToken()
+				c.mqttOpts.SetUsername(c.investorID)
+				c.mqttOpts.SetPassword(currentToken)
+				log.Println("✅ MQTT credentials updated with new token")
+			}
+
+		case <-c.stopTokenRefresh:
+			log.Println("🛑 Stopping periodic token refresh")
+			return
+		}
+	}
+}
+
 func (c *Client) subscribeSymbol(m mqtt.Client, symbol string) {
 
 	topics := []string{
@@ -192,8 +233,30 @@ func (c *Client) subscribeSymbol(m mqtt.Client, symbol string) {
 	}
 
 	for _, topic := range topics {
-		if token := m.Subscribe(topic, 1, c.onMessage); token.Wait() && token.Error() != nil {
-			log.Printf("❌ Subscribe error for %s: %v", topic, token.Error())
+		var lastErr error
+		subscribed := false
+
+		for retry := 0; retry < maxSubscribeRetries; retry++ {
+			if !m.IsConnected() {
+				log.Printf("⚠️ Client not connected, waiting before retry %d/%d for %s", retry+1, maxSubscribeRetries, topic)
+				time.Sleep(subscribeRetryDelay)
+				continue
+			}
+
+			if token := m.Subscribe(topic, 1, c.onMessage); token.Wait() && token.Error() != nil {
+				lastErr = token.Error()
+				log.Printf("❌ Subscribe error for %s (attempt %d/%d): %v", topic, retry+1, maxSubscribeRetries, lastErr)
+				if retry < maxSubscribeRetries-1 {
+					time.Sleep(subscribeRetryDelay)
+				}
+			} else {
+				subscribed = true
+				break
+			}
+		}
+
+		if !subscribed && lastErr != nil {
+			log.Printf("❌ Failed to subscribe to %s after %d retries: %v", topic, maxSubscribeRetries, lastErr)
 		}
 	}
 

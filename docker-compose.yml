@@ -13,8 +13,8 @@ services:
     environment:
       - USR=${USR}
       - PASSWD=${PASSWD}
-      - REDIS_ADDR=${REDIS_ADDR:-localhost:6379}
-      - ENV=${ENV:-prod}
+      - REDIS_ADDR=${REDIS_ADDR}
+      - ENV=${ENV}
     restart: unless-stopped
     logging:
       driver: "json-file"
